@@ -241,9 +241,8 @@ func TestWrapCellSegments_CodeInMonospace(t *testing.T) {
 	require.NotEqual(t, monoW, bodyW, "mono and body widths must differ for the assertion to be meaningful")
 }
 
-// TestDrawCellSegmentsLine_UsesMonoFont asserts that drawing a line with a
-// mono segment leaves the fpdf font set to the mono family — i.e. the code
-// span is rendered in monospace, the core user-visible requirement.
+// TestDrawCellSegmentsLine_UsesMonoFont asserts that styled table segments
+// restore the ambient table font after drawing.
 func TestDrawCellSegmentsLine_UsesMonoFont(t *testing.T) {
 	r := newTableTestRenderer(t)
 	line := []cellSegment{
@@ -254,10 +253,7 @@ func TestDrawCellSegmentsLine_UsesMonoFont(t *testing.T) {
 	r.pdf.SetFont(defFontFamily, "", fontSize-1)
 	r.drawCellSegmentsLine(marginLeft, r.pdf.GetY(), 150, "L", false, line)
 
-	// After drawing, the last segment drawn was plain text (" aqui"), so
-	// the font is back to body. To prove the mono font was actually used for
-	// the code segment, draw a line that ENDS with a mono segment and check
-	// the font family is mono.
+	// The ambient table font must also be restored after a line ending in code.
 	lineMonoEnd := []cellSegment{
 		{text: "code: "},
 		{text: "PrintArg()", mono: true},
@@ -265,9 +261,8 @@ func TestDrawCellSegmentsLine_UsesMonoFont(t *testing.T) {
 	r.pdf.SetXY(marginLeft, r.pdf.GetY()+lineHeight)
 	r.pdf.SetFont(defFontFamily, "", fontSize-1)
 	r.drawCellSegmentsLine(marginLeft, r.pdf.GetY(), 150, "L", false, lineMonoEnd)
-	require.True(t, strings.EqualFold(r.pdf.GetFontFamily(), monoFontFamily),
-		"drawing a line ending in a code segment must leave the mono font selected (got %s)",
-		r.pdf.GetFontFamily())
+	require.True(t, strings.EqualFold(r.pdf.GetFontFamily(), defFontFamily),
+		"drawing a segment must restore the ambient family (got %s)", r.pdf.GetFontFamily())
 }
 
 // newTextNode builds a goldmark Text node whose value is drawn from src.

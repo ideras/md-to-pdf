@@ -15,31 +15,63 @@ import (
 // smaller size. Plain text segments are rendered with the cell's body font
 // (bold for header cells) and may contain emoji, which render as inline images.
 type cellSegment struct {
-	text string
-	mono bool
+	text       string
+	mono       bool
+	color      *[3]int
+	background *[3]int
+	fontFamily string // empty means inherited/default
 }
 
-// appendText adds a plain-text fragment to the cell, coalescing with the
-// previous segment when it is also plain text so that wrapping sees runs of
-// the same font as a single unit.
-func (c *tableCell) appendText(s string) {
+func (seg cellSegment) style() inlineStyle {
+	color := [3]int{}
+	set := seg.color != nil
+	if set {
+		color = *seg.color
+	}
+	return inlineStyle{textColor: color, textColorSet: set, background: cloneColor(seg.background), fontFamily: seg.fontFamily}
+}
+
+func cellSegmentFromStyle(text string, mono bool, style inlineStyle) cellSegment {
+	var color *[3]int
+	if style.textColorSet {
+		value := style.textColor
+		color = &value
+	}
+	return cellSegment{text: text, mono: mono, color: color, background: cloneColor(style.background), fontFamily: style.fontFamily}
+}
+
+func sameCellStyle(a, b cellSegment) bool {
+	return a.mono == b.mono && sameInlineStyle(a.style(), b.style())
+}
+
+// appendText remains a convenient unstyled helper for table tests and callers.
+func (c *tableCell) appendText(s string) { c.appendStyledText(s, inlineStyle{fontFamily: "default"}) }
+
+func (c *tableCell) appendStyledText(s string, style inlineStyle) {
 	if s == "" {
 		return
 	}
-	if n := len(c.segments); n > 0 && !c.segments[n-1].mono {
+	seg := cellSegmentFromStyle(s, false, style)
+	if n := len(c.segments); n > 0 && sameCellStyle(c.segments[n-1], seg) {
 		c.segments[n-1].text += s
-	} else {
-		c.segments = append(c.segments, cellSegment{text: s})
+		return
 	}
+	c.segments = append(c.segments, seg)
 }
 
-// appendCode adds a monospace (inline code) fragment to the cell. Code
-// segments are never coalesced with plain text so the font boundary is exact.
-func (c *tableCell) appendCode(s string) {
+// appendCode remains a convenient unstyled helper for table tests and callers.
+func (c *tableCell) appendCode(s string) { c.appendStyledCode(s, inlineStyle{fontFamily: "default"}) }
+
+func (c *tableCell) appendStyledCode(s string, style inlineStyle) {
 	if s == "" {
 		return
 	}
-	c.segments = append(c.segments, cellSegment{text: s, mono: true})
+	seg := cellSegmentFromStyle(s, true, style)
+	if n := len(c.segments); n > 0 && sameCellStyle(c.segments[n-1], seg) {
+		c.segments[n-1].text += s
+		return
+	}
+	c.segments = append(c.segments, seg)
 }
 
 type tableCell struct {
@@ -276,8 +308,10 @@ func (r *renderer) renderTable() {
 	r.pdf.SetLineWidth(0.2)
 	r.pdf.SetTextColor(0, 0, 0)
 
-	// Spacing after table
-	r.pdf.SetFont(defFontFamily, "", fontSize)
+	// Spacing after table. Restore the enclosing inline span style rather than
+	// leaking table body defaults into following content.
+	r.pdf.SetFontStyle("")
+	r.applyInlineStyle()
 	r.pdf.Ln(4)
 }
 
@@ -424,252 +458,231 @@ func textContainsEmoji(s string) bool {
 	return false
 }
 
-// setCellSegFont selects the font for a cell segment: monospace for code,
-// bold body for header cells, regular body otherwise. The caller must restore
-// the ambient font when it needs to (the table render loop sets fonts per cell).
+// setCellSegFont selects a built-in font. It remains for existing callers;
+// styled table rendering uses setCellSegmentFont below.
 func (r *renderer) setCellSegFont(mono, isHeader bool) {
-	if mono {
-		r.pdf.SetFont(monoFontFamily, "", tableMonoSize)
-	} else if isHeader {
-		r.pdf.SetFont(defFontFamily, "B", tableBodySize)
-	} else {
-		r.pdf.SetFont(defFontFamily, "", tableBodySize)
-	}
+	r.setCellSegmentFont(cellSegment{mono: mono}, isHeader)
 }
 
-// cellContentWidth returns the unwrapped rendered width of a cell's segments,
-// measuring each with its own font (mono for code, body/body-bold for text).
-// The bold flag selects the body style for plain-text segments so the caller
-// can measure the natural width (regular) and the header minimum (bold)
-// independently, mirroring the pre-segment behaviour. Newlines are treated as
-// spaces so GetStringWidth sees a single run.
+func (r *renderer) setCellSegmentFont(seg cellSegment, isHeader bool) {
+	if seg.mono {
+		r.pdf.SetFont(monoFontFamily, "", tableMonoSize)
+		return
+	}
+	family, ok := r.resolveFontFamily(seg.fontFamily)
+	if !ok {
+		family = defFontFamily
+	}
+	style := ""
+	if isHeader {
+		style = "B"
+	}
+	r.pdf.SetFont(family, style, tableBodySize)
+}
+
 func (r *renderer) cellContentWidth(cell *tableCell, bold bool) float64 {
-	var w float64
+	var width float64
 	for _, seg := range cell.segments {
+		r.setCellSegmentFont(seg, bold)
+		text := strings.ReplaceAll(seg.text, "\n", " ")
 		if seg.mono {
-			// Monospace code: measure with the mono font. Code spans never
-			// contain emoji, so GetStringWidth(sanitize) is safe here.
-			r.pdf.SetFont(monoFontFamily, "", tableMonoSize)
-			s := strings.ReplaceAll(seg.text, "\n", " ")
-			w += r.pdf.GetStringWidth(sanitizePDFText(s))
+			width += r.pdf.GetStringWidth(sanitizePDFText(text))
 		} else {
-			// Body text: measure with the body font and account for emoji
-			// image widths (emojiTextWidth handles emoji via splitTextSegments,
-			// so supplementary-plane runes do not panic fpdf's width table).
-			if bold {
-				r.pdf.SetFont(defFontFamily, "B", tableBodySize)
-			} else {
-				r.pdf.SetFont(defFontFamily, "", tableBodySize)
-			}
-			s := strings.ReplaceAll(seg.text, "\n", " ")
-			w += r.emojiTextWidth(s)
+			width += r.emojiTextWidth(text)
 		}
 	}
-	return w
+	return width
 }
 
-// cellToken is a whitespace or non-whitespace run within a cell segment,
-// carrying the segment's mono flag so each token is measured and drawn with
-// the correct font.
 type cellToken struct {
-	text    string
-	mono    bool
+	segment cellSegment
 	isSpace bool
 }
 
-// tokenizeCellSegment splits a segment into alternating space / non-space
-// tokens, preserving spaces so the wrapped text reflows identically to the
-// source.
 func tokenizeCellSegment(seg cellSegment) []cellToken {
-	s := seg.text
-	var toks []cellToken
-	i := 0
-	for i < len(s) {
+	var tokens []cellToken
+	for i := 0; i < len(seg.text); {
 		j := i
-		sp := s[i] == ' ' || s[i] == '\t'
-		for j < len(s) && (s[j] == ' ' || s[j] == '\t') == sp {
+		space := seg.text[i] == ' ' || seg.text[i] == '\t'
+		for j < len(seg.text) && (seg.text[j] == ' ' || seg.text[j] == '\t') == space {
 			j++
 		}
-		toks = append(toks, cellToken{text: s[i:j], mono: seg.mono, isSpace: sp})
+		part := seg
+		part.text = seg.text[i:j]
+		tokens = append(tokens, cellToken{segment: part, isSpace: space})
 		i = j
 	}
-	return toks
+	return tokens
 }
 
-// cellTokenWidth measures a token with its own font. Body text uses
-// emojiTextWidth so emoji images contribute their real width.
-func (r *renderer) cellTokenWidth(tk cellToken, isHeader bool) float64 {
-	r.setCellSegFont(tk.mono, isHeader)
-	if tk.mono {
-		return r.pdf.GetStringWidth(sanitizePDFText(tk.text))
+func (r *renderer) cellTokenWidth(token cellToken, isHeader bool) float64 {
+	r.setCellSegmentFont(token.segment, isHeader)
+	if token.segment.mono {
+		return r.pdf.GetStringWidth(sanitizePDFText(token.segment.text))
 	}
-	return r.emojiTextWidth(tk.text)
+	return r.emojiTextWidth(token.segment.text)
 }
 
-// wrapCellSegments wraps a cell's segments into lines of segments, respecting
-// per-segment fonts and explicit newlines. Each returned line is a slice of
-// segments ready to draw with drawCellSegmentsLine.
 func (r *renderer) wrapCellSegments(cell *tableCell, maxWidth float64) [][]cellSegment {
-	segs := cell.segments
-	if len(segs) == 0 {
+	if len(cell.segments) == 0 {
 		return [][]cellSegment{{}}
 	}
 	if maxWidth <= 0 {
-		return [][]cellSegment{append([]cellSegment(nil), segs...)}
+		return [][]cellSegment{append([]cellSegment(nil), cell.segments...)}
 	}
-
-	// First split on explicit newlines (from <br> and source line breaks)
-	// into rows; each row is then wrapped by words independently.
 	var rows [][]cellSegment
-	var cur []cellSegment
-	for _, seg := range segs {
-		parts := strings.Split(seg.text, "\n")
-		for i, part := range parts {
-			if i > 0 {
-				rows = append(rows, cur)
-				cur = nil
+	var current []cellSegment
+	for _, segment := range cell.segments {
+		for index, part := range strings.Split(segment.text, "\n") {
+			if index > 0 {
+				rows = append(rows, current)
+				current = nil
 			}
 			if part != "" {
-				cur = append(cur, cellSegment{text: part, mono: seg.mono})
+				segmentCopy := segment
+				segmentCopy.text = part
+				current = append(current, segmentCopy)
 			}
 		}
 	}
-	rows = append(rows, cur)
-
+	rows = append(rows, current)
 	var lines [][]cellSegment
 	for _, row := range rows {
 		if len(row) == 0 {
-			lines = append(lines, []cellSegment{{}}) // blank line
+			lines = append(lines, []cellSegment{{}})
 			continue
 		}
 		lines = append(lines, r.wrapRowByWords(cell.isHeader, row, maxWidth)...)
 	}
 	if len(lines) == 0 {
-		lines = [][]cellSegment{{}}
+		return [][]cellSegment{{}}
 	}
 	return lines
 }
 
-// wrapRowByWords greedily wraps one newline-free row of segments into lines,
-// measuring each word with its own font. A single word wider than maxWidth is
-// force-split with fpdf.SplitText using that word's font. Leading and trailing
-// spaces on a wrapped line are dropped.
 func (r *renderer) wrapRowByWords(isHeader bool, row []cellSegment, maxWidth float64) [][]cellSegment {
-	var toks []cellToken
-	for _, seg := range row {
-		toks = append(toks, tokenizeCellSegment(seg)...)
+	var tokens []cellToken
+	for _, segment := range row {
+		tokens = append(tokens, tokenizeCellSegment(segment)...)
 	}
-	if len(toks) == 0 {
+	if len(tokens) == 0 {
 		return [][]cellSegment{{}}
 	}
-
 	var lines [][]cellSegment
-	var cur []int // indices into toks on the current line
-	curW := 0.0
-
+	var current []cellToken
+	width := 0.0
 	flush := func() {
-		// drop trailing space tokens
-		for len(cur) > 0 && toks[cur[len(cur)-1]].isSpace {
-			cur = cur[:len(cur)-1]
+		for len(current) > 0 && current[len(current)-1].isSpace {
+			current = current[:len(current)-1]
 		}
 		var line []cellSegment
-		for _, idx := range cur {
-			tk := toks[idx]
-			if n := len(line); n > 0 && line[n-1].mono == tk.mono {
-				line[n-1].text += tk.text
+		for _, token := range current {
+			segment := token.segment
+			if n := len(line); n > 0 && sameCellStyle(line[n-1], segment) {
+				line[n-1].text += segment.text
 			} else {
-				line = append(line, cellSegment{text: tk.text, mono: tk.mono})
+				line = append(line, segment)
 			}
 		}
-		if line == nil {
+		if len(line) == 0 {
 			line = []cellSegment{{}}
 		}
 		lines = append(lines, line)
-		cur = nil
-		curW = 0.0
+		current = nil
+		width = 0
 	}
-
-	for i, tk := range toks {
-		// No leading whitespace on a fresh line.
-		if tk.isSpace && len(cur) == 0 {
+	for _, token := range tokens {
+		if token.isSpace && len(current) == 0 {
 			continue
 		}
-		tw := r.cellTokenWidth(tk, isHeader)
-		// A single non-space word wider than the column: force-split it.
-		// SplitText indexes fpdf's width table by rune up to U+FFFF, so it
-		// panics on supplementary-plane emoji. Tokens that contain emoji are
-		// placed on their own line intact instead of being force-split.
-		if !tk.isSpace && tw > maxWidth {
-			if len(cur) > 0 {
+		tokenWidth := r.cellTokenWidth(token, isHeader)
+		if !token.isSpace && tokenWidth > maxWidth {
+			if len(current) > 0 {
 				flush()
 			}
-			if !tk.mono && textContainsEmoji(tk.text) {
-				lines = append(lines, []cellSegment{{text: tk.text, mono: tk.mono}})
+			if !token.segment.mono && textContainsEmoji(token.segment.text) {
+				lines = append(lines, []cellSegment{token.segment})
 				continue
 			}
-			r.setCellSegFont(tk.mono, isHeader)
-			for _, p := range r.pdf.SplitText(tk.text, maxWidth) {
-				lines = append(lines, []cellSegment{{text: p, mono: tk.mono}})
+			r.setCellSegmentFont(token.segment, isHeader)
+			for _, part := range r.pdf.SplitText(token.segment.text, maxWidth) {
+				segment := token.segment
+				segment.text = part
+				lines = append(lines, []cellSegment{segment})
 			}
 			continue
 		}
-		if curW+tw > maxWidth && len(cur) > 0 {
+		if width+tokenWidth > maxWidth && len(current) > 0 {
 			flush()
-			if tk.isSpace {
+			if token.isSpace {
 				continue
 			}
 		}
-		cur = append(cur, i)
-		curW += tw
+		current = append(current, token)
+		width += tokenWidth
 	}
-	if len(cur) > 0 {
+	if len(current) > 0 {
 		flush()
 	}
 	if len(lines) == 0 {
-		lines = [][]cellSegment{{}}
+		return [][]cellSegment{{}}
 	}
 	return lines
 }
 
-// segDrawWidth returns the rendered width of one segment on a drawn line,
-// accounting for emoji image widths in body text.
 func (r *renderer) segDrawWidth(seg cellSegment, isHeader bool) float64 {
-	r.setCellSegFont(seg.mono, isHeader)
+	r.setCellSegmentFont(seg, isHeader)
 	if seg.mono {
 		return r.pdf.GetStringWidth(sanitizePDFText(seg.text))
 	}
 	return r.emojiTextWidth(seg.text)
 }
 
-// drawCellSegmentsLine draws one wrapped line of a table cell, switching to
-// the monospace font for code segments and rendering emoji inline for body
-// segments. The whole line is aligned within innerW according to align.
 func (r *renderer) drawCellSegmentsLine(x, y, innerW float64, align string, isHeader bool, line []cellSegment) {
-	lineW := 0.0
+	ambientFamily, ambientStyle := r.pdf.GetFontFamily(), r.pdf.GetFontStyle()
+	ambientSize, _ := r.pdf.GetFontSize()
+	ambientR, ambientG, ambientB := r.pdf.GetTextColor()
+	ambientFillR, ambientFillG, ambientFillB := r.pdf.GetFillColor()
+	defer func() {
+		r.pdf.SetFont(ambientFamily, ambientStyle, ambientSize)
+		r.pdf.SetTextColor(ambientR, ambientG, ambientB)
+		r.pdf.SetFillColor(ambientFillR, ambientFillG, ambientFillB)
+	}()
+
+	lineWidth := 0.0
 	for _, seg := range line {
-		lineW += r.segDrawWidth(seg, isHeader)
+		lineWidth += r.segDrawWidth(seg, isHeader)
 	}
 	startX := x
-	switch align {
-	case "C":
-		startX = x + (innerW-lineW)/2
-	case "R":
-		startX = x + innerW - lineW
+	if align == "C" {
+		startX = x + (innerW-lineWidth)/2
+	} else if align == "R" {
+		startX = x + innerW - lineWidth
 	}
 	if startX < x {
 		startX = x
 	}
-
 	r.pdf.SetXY(startX, y)
 	for _, seg := range line {
+		width := r.segDrawWidth(seg, isHeader)
+		if seg.color != nil {
+			r.pdf.SetTextColor(seg.color[0], seg.color[1], seg.color[2])
+		}
+		if seg.background != nil {
+			atX, atY := r.pdf.GetXY()
+			r.pdf.SetFillColor(seg.background[0], seg.background[1], seg.background[2])
+			r.pdf.Rect(atX, atY, width, lineHeight, "F")
+			r.pdf.SetXY(atX, atY)
+		}
 		if seg.mono {
-			r.pdf.SetFont(monoFontFamily, "", tableMonoSize)
-			if t := sanitizePDFText(seg.text); t != "" {
-				r.pdf.Write(lineHeight, t)
+			if text := sanitizePDFText(seg.text); text != "" {
+				r.pdf.Write(lineHeight, text)
 			}
 		} else {
-			r.setCellSegFont(false, isHeader)
 			r.renderTextWithEmoji(seg.text)
 		}
+		// A segment's color/background must not become ambient table state.
+		r.pdf.SetTextColor(ambientR, ambientG, ambientB)
+		r.pdf.SetFillColor(ambientFillR, ambientFillG, ambientFillB)
 	}
 }

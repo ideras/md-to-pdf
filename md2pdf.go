@@ -12,7 +12,9 @@ import (
 // Option configures a conversion. Options are applied in the order provided.
 type Option func(*options)
 
-type options struct{}
+type options struct {
+	fonts *FontRegistry
+}
 
 // Convert renders Markdown source to PDF and writes it to w.
 func Convert(src []byte, w io.Writer, opts ...Option) error {
@@ -27,7 +29,7 @@ func Convert(src []byte, w io.Writer, opts ...Option) error {
 		}
 	}
 
-	return renderer.Render(src, w)
+	return renderer.Render(src, w, renderer.Options{Fonts: cfg.fonts.rendererRoles()})
 }
 
 // ConvertFile reads a Markdown file and writes a PDF.

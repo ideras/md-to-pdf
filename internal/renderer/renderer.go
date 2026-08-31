@@ -42,8 +42,22 @@ func fontMM(pt float64) float64 {
 	return pt * 25.4 / 72.0
 }
 
+// FontRole is the renderer-owned, immutable font representation.
+type FontRole struct {
+	Name       string
+	Regular    []byte
+	Bold       []byte
+	Italic     []byte
+	BoldItalic []byte
+}
+
+// Options configure a single renderer invocation.
+type Options struct {
+	Fonts []FontRole
+}
+
 // Render converts Markdown source to PDF and writes it to w.
-func Render(src []byte, w io.Writer) (err error) {
+func Render(src []byte, w io.Writer, options Options) (err error) {
 	defer func() {
 		if rec := recover(); rec != nil {
 			err = fmt.Errorf("render markdown panic: %v", rec)
@@ -53,20 +67,45 @@ func Render(src []byte, w io.Writer) (err error) {
 	md := goldmark.New(goldmark.WithExtensions(extension.Table))
 	reader := text.NewReader(src)
 	doc := md.Parser().Parse(reader)
-
 	pdf := fpdf.New("P", "mm", "A4", "")
 
-	// Regular font for body text, with bold/italic variants for headings and emphasis
-	pdf.AddUTF8FontFromBytes("DejaVu", "", fonts.Regular)
-	pdf.AddUTF8FontFromBytes("DejaVu", "B", fonts.Bold)
-	pdf.AddUTF8FontFromBytes("DejaVu", "I", fonts.Italic)
-	pdf.AddUTF8FontFromBytes("DejaVu", "BI", fonts.BoldItalic)
-
-	// Mono font for code blocks and spans
-	pdf.AddUTF8FontFromBytes("JetBrainsMono", "", fonts.Mono)
-	pdf.AddUTF8FontFromBytes("JetBrainsMono", "B", fonts.MonoBold)
-	pdf.SetFont("DejaVu", "", fontSize)
-
+	roles := []struct {
+		logical string
+		family  string
+		role    FontRole
+	}{
+		{"default", defFontFamily, FontRole{"default", fonts.Regular, fonts.Bold, fonts.Italic, fonts.BoldItalic}},
+		{"mono", monoFontFamily, FontRole{"mono", fonts.Mono, fonts.MonoBold, nil, nil}},
+	}
+	fontFamilies := map[string]string{"default": defFontFamily, "mono": monoFontFamily}
+	for _, role := range options.Fonts {
+		roles = append(roles, struct {
+			logical string
+			family  string
+			role    FontRole
+		}{role.Name, "md2pdf-" + role.Name, role})
+		fontFamilies[role.Name] = "md2pdf-" + role.Name
+	}
+	for _, registered := range roles {
+		regular := registered.role.Regular
+		bold := registered.role.Bold
+		italic := registered.role.Italic
+		boldItalic := registered.role.BoldItalic
+		if len(bold) == 0 {
+			bold = regular
+		}
+		if len(italic) == 0 {
+			italic = regular
+		}
+		if len(boldItalic) == 0 {
+			boldItalic = regular
+		}
+		pdf.AddUTF8FontFromBytes(registered.family, "", regular)
+		pdf.AddUTF8FontFromBytes(registered.family, "B", bold)
+		pdf.AddUTF8FontFromBytes(registered.family, "I", italic)
+		pdf.AddUTF8FontFromBytes(registered.family, "BI", boldItalic)
+	}
+	pdf.SetFont(defFontFamily, "", fontSize)
 	pdf.SetMargins(marginLeft, marginTop, marginRight)
 	pdf.SetAutoPageBreak(true, marginBottom)
 	pdf.AddPage()
@@ -77,12 +116,13 @@ func Render(src []byte, w io.Writer) (err error) {
 		src:             src,
 		width:           210 - marginLeft - marginRight, // A4 width minus margins
 		registeredEmoji: make(map[string]bool),
+		fontFamilies:    fontFamilies,
+		currentStyle:    inlineStyle{fontFamily: "default"},
 	}
 
 	if err := ast.Walk(doc, r.walk); err != nil {
 		return fmt.Errorf("render markdown: %w", err)
 	}
-
 	return pdf.Output(w)
 }
 
@@ -112,6 +152,10 @@ type renderer struct {
 	// savedFontSizes is a stack used by <sub>/<sup> handling to restore the
 	// font size when the closing tag is encountered.
 	savedFontSizes []float64
+
+	fontFamilies    map[string]string
+	currentStyle    inlineStyle
+	savedSpanStyles []inlineStyle
 
 	// Blockquote rendering state.
 	// blockquoteDepth counts nesting levels (0 = not inside a blockquote).
@@ -346,19 +390,20 @@ func (r *renderer) handleText(node *ast.Text) {
 	// renderTextWithEmoji applies sanitizePDFText to plain-text portions only.
 	if r.curCell != nil {
 		if raw != "" {
-			r.curCell.appendText(raw)
+			r.curCell.appendStyledText(raw, r.currentStyle)
 		}
 		switch {
 		case node.HardLineBreak():
-			r.curCell.appendText("\n")
+			r.curCell.appendStyledText("\n", r.currentStyle)
 		case node.SoftLineBreak():
-			r.curCell.appendText("\n")
+			r.curCell.appendStyledText("\n", r.currentStyle)
 		}
 		return
 	}
 	// Render text with inline emoji images for emoji runes.
 	if raw != "" {
-		r.renderTextWithEmoji(raw)
+		r.applyInlineStyle()
+		r.renderStyledText(raw)
 	}
 	switch {
 	case node.HardLineBreak():
@@ -368,6 +413,31 @@ func (r *renderer) handleText(node *ast.Text) {
 		// Soft line break: honor the source newline as a visible line break.
 		r.pdf.Ln(lineHeight)
 	}
+}
+
+// renderStyledText writes a single inline run and, when it fits on the
+// current line, paints its requested background before the text. Multi-line
+// backgrounds are intentionally skipped rather than drawn incorrectly.
+func (r *renderer) renderStyledText(text string) {
+	if r.currentStyle.background == nil {
+		r.renderTextWithEmoji(text)
+		return
+	}
+	width := r.emojiTextWidth(text)
+	x, y := r.pdf.GetXY()
+	pageW, pageH := r.pdf.GetPageSize()
+	_, _, right, bottom := r.pdf.GetMargins()
+	if width <= 0 || x+width > pageW-right || y+lineHeight > pageH-bottom {
+		r.renderTextWithEmoji(text)
+		return
+	}
+	fillR, fillG, fillB := r.pdf.GetFillColor()
+	bg := r.currentStyle.background
+	r.pdf.SetFillColor(bg[0], bg[1], bg[2])
+	r.pdf.Rect(x, y, width, lineHeight, "F")
+	r.pdf.SetFillColor(fillR, fillG, fillB)
+	r.pdf.SetXY(x, y)
+	r.renderTextWithEmoji(text)
 }
 
 // sanitizePDFText replaces runes unsupported by go-pdf/fpdf UTF-8 writer.
@@ -435,22 +505,19 @@ func (r *renderer) handleCodeSpan(node *ast.CodeSpan) {
 	}
 	text := sanitizePDFText(buf.String())
 
-	// Inside a table cell, buffer the code text as a monospace segment
-	// instead of writing it directly to the PDF. The table is rendered
-	// later (in renderTable, from handleTableExit); writing now would
-	// place the code at the current cursor Y — above the table — which
-	// is the bug where inline code from table cells appears at the top
-	// of the page instead of inside its cell. Buffering as a code
-	// segment lets renderTable draw it in the monospace font.
+	// Inside a table cell, buffer the code text as a monospace segment.
 	if r.curCell != nil {
-		r.curCell.appendCode(text)
+		r.curCell.appendStyledCode(text, r.currentStyle)
 		return
 	}
 
-	// Render inline code in monospace at slightly smaller size
-	r.pdf.SetFont(monoFontFamily, "", fontSize-1)
+	// Inline code always uses mono, but preserves the surrounding span's color
+	// and restores its family, style, and size afterwards.
+	oldFamily, oldStyle := r.pdf.GetFontFamily(), r.pdf.GetFontStyle()
+	oldSize, _ := r.pdf.GetFontSize()
+	r.pdf.SetFont(monoFontFamily, "", oldSize-1)
 	r.pdf.Write(lineHeight, text)
-	r.pdf.SetFont(defFontFamily, "", fontSize)
+	r.pdf.SetFont(oldFamily, oldStyle, oldSize)
 }
 
 // --- list handlers ---
@@ -731,6 +798,14 @@ func (r *renderer) handleRawHTML(node *ast.RawHTML) {
 	tagName, closing := parseHTMLTag(buf.String())
 
 	switch tagName {
+	case "span":
+		attrs, spanClosing := parseSpanTag(buf.String())
+		if spanClosing || closing {
+			r.closeSpan()
+		} else {
+			r.openSpan(attrs)
+		}
+
 	case "br":
 		// <br> inside a table cell → newline in the buffered segments
 		// (wrapCellSegments splits on \n).  Outside a cell →

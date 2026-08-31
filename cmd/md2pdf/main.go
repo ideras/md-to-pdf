@@ -1,6 +1,7 @@
 package main
 
 import (
+	"flag"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -10,18 +11,33 @@ import (
 )
 
 func main() {
-	if len(os.Args) < 2 {
-		fmt.Fprintf(os.Stderr, "Usage: md2pdf <markdown-file> [output-pdf]\n")
+	fontConfig := flag.String("font-config", "", "path to a TOML custom-font configuration")
+	flag.Usage = func() {
+		fmt.Fprintf(flag.CommandLine.Output(), "Usage: md2pdf [--font-config fonts.toml] <markdown-file> [output-pdf]\n")
+		flag.PrintDefaults()
+	}
+	flag.Parse()
+	if flag.NArg() < 1 || flag.NArg() > 2 {
+		flag.Usage()
 		os.Exit(1)
 	}
 
-	input := os.Args[1]
+	input := flag.Arg(0)
 	output := strings.TrimSuffix(input, filepath.Ext(input)) + ".pdf"
-	if len(os.Args) >= 3 {
-		output = os.Args[2]
+	if flag.NArg() == 2 {
+		output = flag.Arg(1)
 	}
 
-	if err := markdown.ConvertFile(input, output); err != nil {
+	var options []markdown.Option
+	if *fontConfig != "" {
+		registry, err := markdown.LoadFontRegistry(*fontConfig)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "Error loading font config: %v\n", err)
+			os.Exit(1)
+		}
+		options = append(options, markdown.WithFontRegistry(registry))
+	}
+	if err := markdown.ConvertFile(input, output, options...); err != nil {
 		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
 		os.Exit(1)
 	}

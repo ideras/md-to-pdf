@@ -1,0 +1,10 @@
+# Local demonstration configuration. Run commands from the repository root so
+# these relative paths resolve to the embedded DejaVu assets in this checkout.
+# Replace them with your own .ttf files in real deployments.
+
+[[fonts]]
+name = "serif"
+regular = "internal/fonts/assets/DejaVuSans.ttf"
+bold = "internal/fonts/assets/DejaVuSans-Bold.ttf"
+italic = "internal/fonts/assets/DejaVuSans-Oblique.ttf"
+bold_italic = "internal/fonts/assets/DejaVuSans-BoldOblique.ttf"
