@@ -199,7 +199,7 @@ func (r *renderer) renderTable() {
 	}
 
 	availWidth := r.width - 4
-	colWidths := fitTableColumnWidths(naturalWidths, minWidths, availWidth)
+	colWidths := fitTableColumnWidths(naturalWidths, minWidths, r.tableStyle.ColumnWeights, availWidth)
 	totalWidth := 0.0
 	for _, w := range colWidths {
 		totalWidth += w
@@ -327,7 +327,128 @@ func (r *renderer) renderTable() {
 	r.pdf.Ln(4)
 }
 
-func fitTableColumnWidths(naturalWidths, minWidths []float64, availWidth float64) []float64 {
+// fitTableColumnWidths distributes availWidth across the table's columns.
+// Without any positive column weight it keeps the content-driven legacy
+// behavior. With at least one positive weight, weighted columns share the
+// width left after unweighted columns keep their natural content width, so a
+// dominant column (e.g. a long client name) is not squeezed by surrounding
+// short numeric columns whose content is already narrower than its heading.
+func fitTableColumnWidths(naturalWidths, minWidths, columnWeights []float64, availWidth float64) []float64 {
+	numCols := len(naturalWidths)
+	if numCols == 0 {
+		return nil
+	}
+
+	// Normalized minimums and content widths (natural at least its minimum).
+	mins := make([]float64, numCols)
+	naturals := make([]float64, numCols)
+	for i := 0; i < numCols; i++ {
+		m := 12.0
+		if i < len(minWidths) && minWidths[i] > m {
+			m = minWidths[i]
+		}
+		mins[i] = m
+		naturals[i] = m
+		if i < len(naturalWidths) && naturalWidths[i] > naturals[i] {
+			naturals[i] = naturalWidths[i]
+		}
+	}
+
+	weightOf := func(i int) float64 {
+		if i < len(columnWeights) && columnWeights[i] > 0 {
+			return columnWeights[i]
+		}
+		return 0
+	}
+
+	unweightedWidth := 0.0
+	weightSum := 0.0
+	weightedWidth := 0.0
+	for i := 0; i < numCols; i++ {
+		if weightOf(i) > 0 {
+			weightSum += weightOf(i)
+			continue
+		}
+		unweightedWidth += naturals[i]
+	}
+	weightedWidth = availWidth - unweightedWidth
+
+	if weightSum <= 0 || availWidth <= 0 || weightedWidth <= 0 {
+		return fitTableColumnWidthsByContent(naturals, mins, availWidth)
+	}
+
+	widths := make([]float64, numCols)
+	open := make([]int, 0, numCols)
+	for i := 0; i < numCols; i++ {
+		if weightOf(i) == 0 {
+			widths[i] = naturals[i]
+			continue
+		}
+		widths[i] = -1
+		open = append(open, i)
+	}
+
+	// Assign weighted columns proportional to their weights. Columns whose
+	// share would fall below their minimum are pinned at the minimum and the
+	// remaining columns re-share what is left.
+	fixedWeighted := 0.0
+	for range numCols + 1 {
+		if len(open) == 0 {
+			break
+		}
+		flexBudget := weightedWidth - fixedWeighted
+		flexWeight := 0.0
+		for _, i := range open {
+			flexWeight += weightOf(i)
+		}
+		if flexWeight <= 0 || flexBudget <= 0 {
+			// Nothing left to share: pin the rest to their minimums and let the
+			// final overflow correction restore consistency.
+			for _, i := range open {
+				widths[i] = mins[i]
+			}
+			break
+		}
+		shifted := false
+		var stillOpen []int
+		for _, i := range open {
+			widths[i] = flexBudget * weightOf(i) / flexWeight
+			if widths[i] < mins[i] {
+				widths[i] = mins[i]
+				fixedWeighted += mins[i]
+				shifted = true
+				continue
+			}
+			stillOpen = append(stillOpen, i)
+		}
+		open = stillOpen
+		if !shifted {
+			break
+		}
+	}
+
+	totalWidth := 0.0
+	for _, w := range widths {
+		totalWidth += w
+	}
+	if totalWidth > availWidth {
+		// Degenerate configuration (minimums alone overflow): fall back to the
+		// content-driven distribution rather than exceeding the page width.
+		return fitTableColumnWidthsByContent(naturals, mins, availWidth)
+	}
+
+	delta := availWidth
+	for _, w := range widths {
+		delta -= w
+	}
+	widths[numCols-1] += delta
+	return widths
+}
+
+// fitTableColumnWidthsByContent sizes columns purely by content: natural
+// widths fill the page only when they fit, otherwise the surplus above the
+// minimum widths is distributed proportionally.
+func fitTableColumnWidthsByContent(naturalWidths, minWidths []float64, availWidth float64) []float64 {
 	numCols := len(naturalWidths)
 	if numCols == 0 {
 		return nil

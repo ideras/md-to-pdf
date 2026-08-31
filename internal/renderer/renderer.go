@@ -55,8 +55,9 @@ type FontRole struct {
 // TableStyle configures the appearance of Markdown tables for a single
 // renderer invocation. Its zero value preserves the default table appearance.
 type TableStyle struct {
-	FontSize   float64
-	Borderless bool
+	FontSize      float64
+	Borderless    bool
+	ColumnWeights []float64
 }
 
 // Header configures a title and optional PNG logo above the document body.

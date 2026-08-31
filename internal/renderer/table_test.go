@@ -83,7 +83,7 @@ func TestFitTableColumnWidths_PreservesMinimumWidthsWhenShrinking(t *testing.T) 
 	mins := []float64{12, 18, 12}
 	avail := 166.0
 
-	got := fitTableColumnWidths(natural, mins, avail)
+	got := fitTableColumnWidths(natural, mins, nil, avail)
 	require.Len(t, got, 3)
 	require.InDelta(t, avail, got[0]+got[1]+got[2], 0.01)
 	require.GreaterOrEqual(t, got[1], mins[1]-0.01) // keep "Puntaje" readable
@@ -95,12 +95,70 @@ func TestFitTableColumnWidths_ScalesMinimumsWhenTheyDontFit(t *testing.T) {
 	mins := []float64{100, 100, 100}
 	avail := 90.0
 
-	got := fitTableColumnWidths(natural, mins, avail)
+	got := fitTableColumnWidths(natural, mins, nil, avail)
 	require.Len(t, got, 3)
 	require.InDelta(t, avail, got[0]+got[1]+got[2], 0.01)
 	for _, w := range got {
 		require.Greater(t, w, 0.0)
 	}
+}
+
+func TestFitTableColumnWidths_WeightedColumnAbsorbsSurplus(t *testing.T) {
+	natural := []float64{60, 12, 12, 16, 18} // narrow numeric columns, wide names
+	mins := []float64{42, 12, 12, 12, 12}
+	avail := 166.0
+	// All surplus goes to column 0; the rest keep their natural width.
+	weights := []float64{1, 0, 0, 0, 0}
+
+	got := fitTableColumnWidths(natural, mins, weights, avail)
+	require.Len(t, got, 5)
+	require.InDelta(t, avail, got[0]+got[1]+got[2]+got[3]+got[4], 0.01)
+	require.InDelta(t, 12.0, got[1], 0.01)
+	require.InDelta(t, 12.0, got[2], 0.01)
+	require.InDelta(t, 16.0, got[3], 0.01)
+	require.InDelta(t, 18.0, got[4], 0.01)
+	// The weighted column takes everything left over beyond its natural width.
+	require.InDelta(t, 108.0, got[0], 0.01)
+}
+
+func TestFitTableColumnWidths_WeightedSharesRespectRatios(t *testing.T) {
+	natural := []float64{40, 40, 20}
+	mins := []float64{30, 30, 15}
+	avail := 180.0
+	weights := []float64{1, 3, 0}
+
+	got := fitTableColumnWidths(natural, mins, weights, avail)
+	require.Len(t, got, 3)
+	require.InDelta(t, avail, got[0]+got[1]+got[2], 0.01)
+	require.InDelta(t, 20.0, got[2], 0.01) // unweighted column keeps natural width
+	// Weighted columns share 180 - 20 = 160 in a 1:3 ratio.
+	require.InDelta(t, 40.0, got[0], 0.01)
+	require.InDelta(t, 120.0, got[1], 0.01)
+}
+
+func TestFitTableColumnWidths_WeightedFallsBackToContentWhenTooNarrow(t *testing.T) {
+	natural := []float64{200, 10}
+	mins := []float64{100, 8}
+	avail := 166.0
+	weights := []float64{1, 0}
+
+	// Unweighted natural (10) leaves room, but the weighted share would drop
+	// below its minimum and pinned minimums (200+8... ) overflow: content fit.
+	got := fitTableColumnWidths(natural, mins, weights, avail)
+	require.Len(t, got, 2)
+	require.Greater(t, got[0], 100.0-0.01)
+	require.InDelta(t, avail, got[0]+got[1], 0.01)
+}
+
+func TestFitTableColumnWidths_NilWeightsPreservesLegacyBehavior(t *testing.T) {
+	natural := []float64{30, 30, 30}
+	mins := []float64{12, 12, 12}
+	avail := 100.0
+
+	got := fitTableColumnWidths(natural, mins, nil, avail)
+	require.InDelta(t, 30.0, got[0], 0.01) // no stretching without weights
+	require.InDelta(t, 30.0, got[1], 0.01)
+	require.InDelta(t, 30.0, got[2], 0.01)
 }
 
 // newCodeSpan builds a goldmark CodeSpan node whose text is drawn from src.
