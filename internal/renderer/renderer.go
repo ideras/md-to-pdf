@@ -52,9 +52,24 @@ type FontRole struct {
 	BoldItalic []byte
 }
 
+// TableStyle configures the appearance of Markdown tables for a single
+// renderer invocation. Its zero value preserves the default table appearance.
+type TableStyle struct {
+	FontSize   float64
+	Borderless bool
+}
+
+// Header configures a title and optional PNG logo above the document body.
+type Header struct {
+	Title   string
+	LogoPNG []byte
+}
+
 // Options configure a single renderer invocation.
 type Options struct {
-	Fonts []FontRole
+	Fonts      []FontRole
+	TableStyle TableStyle
+	Header     Header
 }
 
 // Render converts Markdown source to PDF and writes it to w.
@@ -119,7 +134,10 @@ func Render(src []byte, w io.Writer, options Options) (err error) {
 		registeredEmoji: make(map[string]bool),
 		fontFamilies:    fontFamilies,
 		currentStyle:    inlineStyle{fontFamily: "default"},
+		tableStyle:      options.TableStyle,
+		header:          options.Header,
 	}
+	r.renderHeader()
 
 	if err := ast.Walk(doc, r.walk); err != nil {
 		return fmt.Errorf("render markdown: %w", err)
@@ -137,10 +155,12 @@ type renderer struct {
 	listStack []listState
 
 	// Table state
-	inTable   bool
-	tableData *tableData
-	curRow    *tableRow
-	curCell   *tableCell
+	inTable    bool
+	tableData  *tableData
+	curRow     *tableRow
+	curCell    *tableCell
+	tableStyle TableStyle
+	header     Header
 
 	// Saved left margin — restored when the outermost list ends
 	// so wrapped list text aligns after the bullet, not at the page edge.
@@ -170,6 +190,61 @@ type renderer struct {
 type listState struct {
 	ordered bool
 	idx     int
+}
+
+func (r *renderer) renderHeader() {
+	if r.header.Title == "" && len(r.header.LogoPNG) == 0 {
+		return
+	}
+
+	y := r.pdf.GetY()
+	titleX := marginLeft
+	headerHeight := 12.0
+	if len(r.header.LogoPNG) > 0 {
+		const logoWidth = 20.0
+		r.pdf.RegisterImageOptionsReader("md2pdf-header-logo", fpdf.ImageOptions{ImageType: "PNG"}, bytes.NewReader(r.header.LogoPNG))
+		r.pdf.ImageOptions("md2pdf-header-logo", marginLeft, y, logoWidth, 0, false, fpdf.ImageOptions{ImageType: "PNG"}, 0, "")
+		titleX += logoWidth + 4
+		headerHeight = 24
+	}
+	if r.header.Title != "" {
+		r.pdf.SetFont(defFontFamily, "B", 16)
+		r.pdf.SetTextColor(20, 75, 58)
+		r.pdf.SetXY(titleX, y+7)
+		r.pdf.CellFormat(marginLeft+r.width-titleX, 8, r.header.Title, "", 0, "L", false, 0, "")
+	}
+
+	lineY := y + headerHeight
+	r.pdf.SetDrawColor(20, 75, 58)
+	r.pdf.SetLineWidth(0.4)
+	r.pdf.Line(marginLeft, lineY, marginLeft+r.width, lineY)
+	r.pdf.SetDrawColor(0, 0, 0)
+	r.pdf.SetLineWidth(0.2)
+	r.pdf.SetTextColor(0, 0, 0)
+	r.pdf.SetFont(defFontFamily, "", fontSize)
+	r.pdf.SetXY(marginLeft, lineY+4)
+}
+
+func (r *renderer) tableBodyFontSize() float64 {
+	if r.tableStyle.FontSize >= 5 && r.tableStyle.FontSize <= fontSize {
+		return r.tableStyle.FontSize
+	}
+	return tableBodySize
+}
+
+func (r *renderer) tableMonoFontSize() float64 {
+	size := r.tableBodyFontSize() - 1
+	if size < 4 {
+		return 4
+	}
+	return size
+}
+
+func (r *renderer) tableLineHeight() float64 {
+	if r.tableStyle.FontSize >= 5 && r.tableStyle.FontSize <= fontSize {
+		return fontMM(r.tableBodyFontSize()) * 1.6
+	}
+	return lineHeight
 }
 
 func (r *renderer) walk(n ast.Node, entering bool) (ast.WalkStatus, error) {

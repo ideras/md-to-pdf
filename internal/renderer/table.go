@@ -169,7 +169,7 @@ func (r *renderer) renderTable() {
 		minWidths[i] = 12
 	}
 
-	r.pdf.SetFont(defFontFamily, "", tableBodySize)
+	r.pdf.SetFont(defFontFamily, "", r.tableBodyFontSize())
 	for _, row := range r.tableData.rows {
 		for i, cell := range row.cells {
 			// Include cell padding (2 × cellPadX) plus slack so SplitText and
@@ -191,7 +191,7 @@ func (r *renderer) renderTable() {
 			}
 		}
 	}
-	r.pdf.SetFont(defFontFamily, "", tableBodySize)
+	r.pdf.SetFont(defFontFamily, "", r.tableBodyFontSize())
 	for i := range naturalWidths {
 		if naturalWidths[i] < minWidths[i] {
 			naturalWidths[i] = minWidths[i]
@@ -213,10 +213,18 @@ func (r *renderer) renderTable() {
 	tableEndX := xStart + totalWidth
 	cellPadX := fontMM(fontSize) * 1.0
 	cellPadY := fontMM(fontSize) * 0.5
+	if r.tableStyle.Borderless {
+		// Borderless tables do not need room for visible cell outlines, so use
+		// tighter padding to give dense reports more space for their content.
+		cellPadX = fontMM(r.tableBodyFontSize()) * 0.7
+		cellPadY = fontMM(r.tableBodyFontSize()) * 0.4
+	}
 
-	// Ensure visible borders: set draw colour and line width for the whole table
-	r.pdf.SetDrawColor(120, 120, 120) // medium gray borders
-	r.pdf.SetLineWidth(0.3)
+	if !r.tableStyle.Borderless {
+		// Ensure visible borders: set draw colour and line width for the whole table.
+		r.pdf.SetDrawColor(120, 120, 120) // medium gray borders
+		r.pdf.SetLineWidth(0.3)
+	}
 
 	for rowIdx, row := range r.tableData.rows {
 		// Determine if this is a header row (first row with isHeader cells)
@@ -232,9 +240,9 @@ func (r *renderer) renderTable() {
 			}
 
 			if cell.isHeader {
-				r.pdf.SetFont(defFontFamily, "B", tableBodySize)
+				r.pdf.SetFont(defFontFamily, "B", r.tableBodyFontSize())
 			} else {
-				r.pdf.SetFont(defFontFamily, "", tableBodySize)
+				r.pdf.SetFont(defFontFamily, "", r.tableBodyFontSize())
 			}
 			lineSegs := r.wrapCellSegments(&cell, colWidths[colIdx]-2*cellPadX)
 			wrappedSegsByCol[colIdx] = lineSegs
@@ -243,7 +251,7 @@ func (r *renderer) renderTable() {
 			}
 		}
 
-		rowH := float64(maxLines)*lineHeight + 2*cellPadY
+		rowH := float64(maxLines)*r.tableLineHeight() + 2*cellPadY
 
 		// Add a page break before the row if needed.
 		rowY := r.pdf.GetY()
@@ -262,11 +270,11 @@ func (r *renderer) renderTable() {
 			}
 
 			if cell.isHeader {
-				r.pdf.SetFont(defFontFamily, "B", tableBodySize)
+				r.pdf.SetFont(defFontFamily, "B", r.tableBodyFontSize())
 				r.pdf.SetFillColor(222, 235, 247) // subtle blue header background
 				r.pdf.SetTextColor(44, 62, 80)    // dark slate text
 			} else {
-				r.pdf.SetFont(defFontFamily, "", tableBodySize)
+				r.pdf.SetFont(defFontFamily, "", r.tableBodyFontSize())
 				// Alternate row background — skip for header (uses its own fill)
 				if rowIdx%2 == 0 {
 					r.pdf.SetFillColor(255, 255, 255)
@@ -276,15 +284,19 @@ func (r *renderer) renderTable() {
 				r.pdf.SetTextColor(51, 51, 51) // dark gray body text
 			}
 
-			// Cell background + border.
-			r.pdf.Rect(x, rowY, colWidths[colIdx], rowH, "FD")
+			// Cell background, with an optional outline.
+			drawMode := "FD"
+			if r.tableStyle.Borderless {
+				drawMode = "F"
+			}
+			r.pdf.Rect(x, rowY, colWidths[colIdx], rowH, drawMode)
 
 			// Cell text (wrapped).
 			textY := rowY + cellPadY
 			innerW := colWidths[colIdx] - 2*cellPadX
 			for _, line := range wrappedSegsByCol[colIdx] {
 				r.drawCellSegmentsLine(x+cellPadX, textY, innerW, cell.align, cell.isHeader, line)
-				textY += lineHeight
+				textY += r.tableLineHeight()
 			}
 
 			x += colWidths[colIdx]
@@ -293,7 +305,7 @@ func (r *renderer) renderTable() {
 		r.pdf.SetXY(xStart, rowY+rowH)
 
 		// Draw a thicker separator line under the header row.
-		if isHeaderRow && rowIdx+1 < len(r.tableData.rows) {
+		if !r.tableStyle.Borderless && isHeaderRow && rowIdx+1 < len(r.tableData.rows) {
 			r.pdf.SetDrawColor(80, 90, 100) // darker line under header
 			r.pdf.SetLineWidth(0.6)
 			r.pdf.Line(xStart, rowY+rowH-0.3, tableEndX, rowY+rowH-0.3)
@@ -434,7 +446,7 @@ func (r *renderer) wrapTableCellText(text string, maxWidth float64) []string {
 
 func (r *renderer) emojiTextWidth(text string) float64 {
 	width := 0.0
-	emojiW := (lineHeight - 0.5) + 0.5
+	emojiW := (r.tableLineHeight() - 0.5) + 0.5
 	for _, seg := range splitTextSegments(text) {
 		if len(seg.emojis) > 0 {
 			width += emojiW
@@ -466,7 +478,7 @@ func (r *renderer) setCellSegFont(mono, isHeader bool) {
 
 func (r *renderer) setCellSegmentFont(seg cellSegment, isHeader bool) {
 	if seg.mono {
-		r.pdf.SetFont(monoFontFamily, "", tableMonoSize)
+		r.pdf.SetFont(monoFontFamily, "", r.tableMonoFontSize())
 		return
 	}
 	family, ok := r.resolveFontFamily(seg.fontFamily)
@@ -477,7 +489,7 @@ func (r *renderer) setCellSegmentFont(seg cellSegment, isHeader bool) {
 	if isHeader {
 		style = "B"
 	}
-	r.pdf.SetFont(family, style, tableBodySize)
+	r.pdf.SetFont(family, style, r.tableBodyFontSize())
 }
 
 func (r *renderer) cellContentWidth(cell *tableCell, bold bool) float64 {
@@ -671,12 +683,12 @@ func (r *renderer) drawCellSegmentsLine(x, y, innerW float64, align string, isHe
 		if seg.background != nil {
 			atX, atY := r.pdf.GetXY()
 			r.pdf.SetFillColor(seg.background[0], seg.background[1], seg.background[2])
-			r.pdf.Rect(atX, atY, width, lineHeight, "F")
+			r.pdf.Rect(atX, atY, width, r.tableLineHeight(), "F")
 			r.pdf.SetXY(atX, atY)
 		}
 		if seg.mono {
 			if text := sanitizePDFText(seg.text); text != "" {
-				r.pdf.Write(lineHeight, text)
+				r.pdf.Write(r.tableLineHeight(), text)
 			}
 		} else {
 			r.renderTextWithEmoji(seg.text)

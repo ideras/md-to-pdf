@@ -51,6 +51,34 @@ are skipped rather than painted inaccurately.
 
 Both entry points accept optional `md2pdf.Option` values.
 
+### Document header
+
+Add a title and PNG logo above the rendered Markdown. The logo is provided as
+bytes so applications can embed it with `go:embed`:
+
+```go
+err := md2pdf.Convert(markdown, output,
+    md2pdf.WithHeader(md2pdf.Header{
+        Title:   "Lotificacion Deras",
+        LogoPNG: logoPNG,
+    }),
+)
+```
+
+### Dense tables
+
+Use a smaller table font and omit cell borders for compact reports. Header and
+alternating-row backgrounds are retained for readability:
+
+```go
+err := md2pdf.Convert(markdown, output,
+    md2pdf.WithTableStyle(md2pdf.TableStyle{
+        FontSize:   8, // supported range: 5–11 pt
+        Borderless: true,
+    }),
+)
+```
+
 ## CLI
 
 ```sh

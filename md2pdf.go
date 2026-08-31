@@ -13,7 +13,36 @@ import (
 type Option func(*options)
 
 type options struct {
-	fonts *FontRegistry
+	fonts      *FontRegistry
+	tableStyle TableStyle
+	header     Header
+}
+
+// TableStyle controls how Markdown tables are rendered. A zero value preserves
+// the default table appearance.
+type TableStyle struct {
+	// FontSize sets the table body font size in points. Values outside the
+	// supported range (5 through 11) use the default size.
+	FontSize float64
+	// Borderless omits cell outlines while retaining header and alternating-row
+	// backgrounds for readable dense reports.
+	Borderless bool
+}
+
+// WithTableStyle applies table-specific rendering settings to a conversion.
+func WithTableStyle(style TableStyle) Option {
+	return func(cfg *options) { cfg.tableStyle = style }
+}
+
+// Header adds a title and optional PNG logo above the Markdown document.
+type Header struct {
+	Title   string
+	LogoPNG []byte
+}
+
+// WithHeader adds a document header to a conversion.
+func WithHeader(header Header) Option {
+	return func(cfg *options) { cfg.header = header }
 }
 
 // Convert renders Markdown source to PDF and writes it to w.
@@ -29,7 +58,17 @@ func Convert(src []byte, w io.Writer, opts ...Option) error {
 		}
 	}
 
-	return renderer.Render(src, w, renderer.Options{Fonts: cfg.fonts.rendererRoles()})
+	return renderer.Render(src, w, renderer.Options{
+		Fonts: cfg.fonts.rendererRoles(),
+		TableStyle: renderer.TableStyle{
+			FontSize:   cfg.tableStyle.FontSize,
+			Borderless: cfg.tableStyle.Borderless,
+		},
+		Header: renderer.Header{
+			Title:   cfg.header.Title,
+			LogoPNG: cfg.header.LogoPNG,
+		},
+	})
 }
 
 // ConvertFile reads a Markdown file and writes a PDF.
