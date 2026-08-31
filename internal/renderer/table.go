@@ -85,9 +85,82 @@ type tableRow struct {
 }
 
 type tableData struct {
-	rows      []tableRow
-	alignMode string // alignment for the full table
-	colWidths []float64
+	rows                []tableRow
+	alignMode           string // alignment for the full table
+	colWidths           []float64
+	// repeatedHeaderPages records the page numbers on which the table's header
+	// row was re-drawn after a page break. Test seam for page-span diagnostics.
+	repeatedHeaderPages []int
+}
+
+// wrapTableRowCells pre-wraps every cell of a row to compute wrapped line
+// segments and the row's line count.
+func (r *renderer) wrapTableRowCells(row tableRow, numCols int, colWidths []float64, cellPadX float64) ([][][]cellSegment, int) {
+	wrappedSegsByCol := make([][][]cellSegment, numCols)
+	maxLines := 1
+	for colIdx := 0; colIdx < numCols; colIdx++ {
+		var cell tableCell
+		if colIdx < len(row.cells) {
+			cell = row.cells[colIdx]
+		}
+
+		if cell.isHeader {
+			r.pdf.SetFont(defFontFamily, "B", r.tableBodyFontSize())
+		} else {
+			r.pdf.SetFont(defFontFamily, "", r.tableBodyFontSize())
+		}
+		lineSegs := r.wrapCellSegments(&cell, colWidths[colIdx]-2*cellPadX)
+		wrappedSegsByCol[colIdx] = lineSegs
+		if len(lineSegs) > maxLines {
+			maxLines = len(lineSegs)
+		}
+	}
+	return wrappedSegsByCol, maxLines
+}
+
+// drawTableRowCells paints one table row at rowY from pre-wrapped line
+// segments. rowIdx drives the alternating row background for body cells;
+// header cells always use the header fill.
+func (r *renderer) drawTableRowCells(row tableRow, wrappedSegsByCol [][][]cellSegment, rowY, rowH float64, xStart float64, colWidths []float64, cellPadX, cellPadY float64, numCols int, rowIdx int) {
+	x := xStart
+	for colIdx := 0; colIdx < numCols; colIdx++ {
+		var cell tableCell
+		if colIdx < len(row.cells) {
+			cell = row.cells[colIdx]
+		}
+
+		if cell.isHeader {
+			r.pdf.SetFont(defFontFamily, "B", r.tableBodyFontSize())
+			r.pdf.SetFillColor(222, 235, 247) // subtle blue header background
+			r.pdf.SetTextColor(44, 62, 80)    // dark slate text
+		} else {
+			r.pdf.SetFont(defFontFamily, "", r.tableBodyFontSize())
+			// Alternate row background — skip for header (uses its own fill)
+			if rowIdx%2 == 0 {
+				r.pdf.SetFillColor(255, 255, 255)
+			} else {
+				r.pdf.SetFillColor(245, 247, 250)
+			}
+			r.pdf.SetTextColor(51, 51, 51) // dark gray body text
+		}
+
+		// Cell background, with an optional outline.
+		drawMode := "FD"
+		if r.tableStyle.Borderless {
+			drawMode = "F"
+		}
+		r.pdf.Rect(x, rowY, colWidths[colIdx], rowH, drawMode)
+
+		// Cell text (wrapped).
+		textY := rowY + cellPadY
+		innerW := colWidths[colIdx] - 2*cellPadX
+		for _, line := range wrappedSegsByCol[colIdx] {
+			r.drawCellSegmentsLine(x+cellPadX, textY, innerW, cell.align, cell.isHeader, line)
+			textY += r.tableLineHeight()
+		}
+
+		x += colWidths[colIdx]
+	}
 }
 
 // --- table handlers ---
@@ -229,31 +302,22 @@ func (r *renderer) renderTable() {
 		r.pdf.SetLineWidth(0.3)
 	}
 
+	// The header row (first row with header cells) repeats whenever the table
+	// breaks across pages.
+	headerRowIdx := -1
+	for rowIdx, row := range r.tableData.rows {
+		if len(row.cells) > 0 && row.cells[0].isHeader {
+			headerRowIdx = rowIdx
+			break
+		}
+	}
+
 	for rowIdx, row := range r.tableData.rows {
 		// Determine if this is a header row (first row with isHeader cells)
 		isHeaderRow := len(row.cells) > 0 && row.cells[0].isHeader
 
 		// Pre-wrap each cell to compute dynamic row height.
-		wrappedSegsByCol := make([][][]cellSegment, numCols)
-		maxLines := 1
-		for colIdx := 0; colIdx < numCols; colIdx++ {
-			var cell tableCell
-			if colIdx < len(row.cells) {
-				cell = row.cells[colIdx]
-			}
-
-			if cell.isHeader {
-				r.pdf.SetFont(defFontFamily, "B", r.tableBodyFontSize())
-			} else {
-				r.pdf.SetFont(defFontFamily, "", r.tableBodyFontSize())
-			}
-			lineSegs := r.wrapCellSegments(&cell, colWidths[colIdx]-2*cellPadX)
-			wrappedSegsByCol[colIdx] = lineSegs
-			if len(lineSegs) > maxLines {
-				maxLines = len(lineSegs)
-			}
-		}
-
+		wrappedSegsByCol, maxLines := r.wrapTableRowCells(row, numCols, colWidths, cellPadX)
 		rowH := float64(maxLines)*r.tableLineHeight() + 2*cellPadY
 
 		// Add a page break before the row if needed.
@@ -263,47 +327,17 @@ func (r *renderer) renderTable() {
 		if rowY+rowH > pageH-brkMargin {
 			r.pdf.AddPage()
 			rowY = r.pdf.GetY()
+			// Repeat the header row on the new page so columns stay labelled.
+			if headerRowIdx >= 0 && rowIdx > headerRowIdx {
+				headerWrapped, headerMaxLines := r.wrapTableRowCells(r.tableData.rows[headerRowIdx], numCols, colWidths, cellPadX)
+				headerH := float64(headerMaxLines)*r.tableLineHeight() + 2*cellPadY
+				r.drawTableRowCells(r.tableData.rows[headerRowIdx], headerWrapped, rowY, headerH, xStart, colWidths, cellPadX, cellPadY, numCols, headerRowIdx)
+				rowY += headerH
+				r.tableData.repeatedHeaderPages = append(r.tableData.repeatedHeaderPages, r.pdf.PageNo())
+			}
 		}
 
-		x := xStart
-		for colIdx := 0; colIdx < numCols; colIdx++ {
-			var cell tableCell
-			if colIdx < len(row.cells) {
-				cell = row.cells[colIdx]
-			}
-
-			if cell.isHeader {
-				r.pdf.SetFont(defFontFamily, "B", r.tableBodyFontSize())
-				r.pdf.SetFillColor(222, 235, 247) // subtle blue header background
-				r.pdf.SetTextColor(44, 62, 80)    // dark slate text
-			} else {
-				r.pdf.SetFont(defFontFamily, "", r.tableBodyFontSize())
-				// Alternate row background — skip for header (uses its own fill)
-				if rowIdx%2 == 0 {
-					r.pdf.SetFillColor(255, 255, 255)
-				} else {
-					r.pdf.SetFillColor(245, 247, 250)
-				}
-				r.pdf.SetTextColor(51, 51, 51) // dark gray body text
-			}
-
-			// Cell background, with an optional outline.
-			drawMode := "FD"
-			if r.tableStyle.Borderless {
-				drawMode = "F"
-			}
-			r.pdf.Rect(x, rowY, colWidths[colIdx], rowH, drawMode)
-
-			// Cell text (wrapped).
-			textY := rowY + cellPadY
-			innerW := colWidths[colIdx] - 2*cellPadX
-			for _, line := range wrappedSegsByCol[colIdx] {
-				r.drawCellSegmentsLine(x+cellPadX, textY, innerW, cell.align, cell.isHeader, line)
-				textY += r.tableLineHeight()
-			}
-
-			x += colWidths[colIdx]
-		}
+		r.drawTableRowCells(row, wrappedSegsByCol, rowY, rowH, xStart, colWidths, cellPadX, cellPadY, numCols, rowIdx)
 
 		r.pdf.SetXY(xStart, rowY+rowH)
 

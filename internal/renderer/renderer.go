@@ -125,8 +125,6 @@ func Render(src []byte, w io.Writer, options Options) (err error) {
 	pdf.SetFont(defFontFamily, "", fontSize)
 	pdf.SetMargins(marginLeft, marginTop, marginRight)
 	pdf.SetAutoPageBreak(true, marginBottom)
-	pdf.AddPage()
-	pdf.SetFont(defFontFamily, "", fontSize)
 
 	r := &renderer{
 		pdf:             pdf,
@@ -138,7 +136,12 @@ func Render(src []byte, w io.Writer, options Options) (err error) {
 		tableStyle:      options.TableStyle,
 		header:          options.Header,
 	}
-	r.renderHeader()
+	// Repeat the company header on every page. homeMode stays false so fpdf
+	// keeps the cursor where the header left it (just below the divider)
+	// instead of resetting it over the drawn header.
+	pdf.SetHeaderFuncMode(r.drawCompanyHeader, false)
+	pdf.AddPage()
+	pdf.SetFont(defFontFamily, "", fontSize)
 
 	if err := ast.Walk(doc, r.walk); err != nil {
 		return fmt.Errorf("render markdown: %w", err)
@@ -193,12 +196,15 @@ type listState struct {
 	idx     int
 }
 
-func (r *renderer) renderHeader() {
+// drawCompanyHeader renders the company title and logo at the top of the
+// current page. fpdf invokes it on every page via SetHeaderFuncMode; on page
+// starts the cursor sits at the top margin.
+func (r *renderer) drawCompanyHeader() {
 	if r.header.Title == "" && len(r.header.LogoPNG) == 0 {
 		return
 	}
 
-	y := r.pdf.GetY()
+	y := marginTop
 	titleX := marginLeft
 	headerHeight := 12.0
 	if len(r.header.LogoPNG) > 0 {

@@ -1,6 +1,8 @@
 package renderer
 
 import (
+	"bytes"
+	"fmt"
 	"strings"
 	"testing"
 
@@ -401,4 +403,69 @@ func TestWrapCellSegments_EmojiNoForceSplitPanic(t *testing.T) {
 		require.NotEmpty(t, lines)
 		require.Contains(t, lines[0][0].text, "👍")
 	})
+}
+
+func TestRenderTable_RepeatsHeaderRowOnPageBreaks(t *testing.T) {
+	r := newTableTestRenderer(t)
+	rows := []tableRow{
+		{cells: []tableCell{{segments: []cellSegment{{text: "Cliente"}}, isHeader: true, align: "L"}}},
+	}
+	for i := 0; i < 120; i++ {
+		rows = append(rows, tableRow{cells: []tableCell{
+			{segments: []cellSegment{{text: fmt.Sprintf("Row number %d", i)}}, align: "L"},
+		}})
+	}
+	r.tableData = &tableData{rows: rows, alignMode: "L"}
+
+	y0 := r.pdf.GetY()
+	r.renderTable()
+
+	require.Greater(t, r.pdf.PageCount(), 1, "the table must span multiple pages")
+	require.Len(t, r.tableData.repeatedHeaderPages, r.pdf.PageCount()-1,
+		"the header row must repeat exactly once per continued page")
+	// The repeated header pages must be every page after the first.
+	for i, page := range r.tableData.repeatedHeaderPages {
+		require.Equal(t, i+2, page)
+	}
+	_ = y0
+}
+
+func TestRenderTable_DoesNotRepeatHeaderOnSinglePage(t *testing.T) {
+	r := newTableTestRenderer(t)
+	r.tableData = &tableData{
+		rows: []tableRow{
+			{cells: []tableCell{{segments: []cellSegment{{text: "Cliente"}}, isHeader: true, align: "L"}}},
+			{cells: []tableCell{{segments: []cellSegment{{text: "Ana"}}, align: "L"}}},
+		},
+		alignMode: "L",
+	}
+
+	r.renderTable()
+	require.Equal(t, 1, r.pdf.PageCount())
+	require.Empty(t, r.tableData.repeatedHeaderPages)
+}
+
+func TestConvert_CompanyHeaderRepeatsOnEveryPage(t *testing.T) {
+	var rows strings.Builder
+	rows.WriteString("| Cliente | Saldo |\n| --- | ---: |\n")
+	for i := 0; i < 140; i++ {
+		rows.WriteString(fmt.Sprintf("| Cliente número %d | %d |\n", i, i*10))
+	}
+
+	var pdf bytes.Buffer
+	err := Render([]byte(rows.String()), &pdf, Options{
+		TableStyle: TableStyle{FontSize: 8, Borderless: true},
+		Header:     Header{Title: "Lotificacion Deras"},
+	})
+	require.NoError(t, err)
+
+	require.GreaterOrEqual(t, countPDFPages(pdf.Bytes()), 3,
+		"a 140-row table must span several pages, each drawing the company header")	
+}
+
+// countPDFPages counts page objects in an uncompressed fpdf document. Every
+// page contributes exactly one "/Type /Page\n" object (the catalog is
+// "/Type /Pages").
+func countPDFPages(document []byte) int {
+	return bytes.Count(document, []byte("/Type /Page\n"))
 }
