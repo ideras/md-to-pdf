@@ -85,9 +85,9 @@ type tableRow struct {
 }
 
 type tableData struct {
-	rows                []tableRow
-	alignMode           string // alignment for the full table
-	colWidths           []float64
+	rows      []tableRow
+	alignMode string // alignment for the full table
+	colWidths []float64
 	// repeatedHeaderPages records the page numbers on which the table's header
 	// row was re-drawn after a page break. Test seam for page-span diagnostics.
 	repeatedHeaderPages []int
@@ -302,6 +302,14 @@ func (r *renderer) renderTable() {
 		r.pdf.SetLineWidth(0.3)
 	}
 
+	// The table owns its page breaks: the pre-row break check below measures the
+	// complete row height, so fpdf's per-Write automatic break must not fire
+	// mid-row — one cell would otherwise land alone on the next page and leave
+	// every following row stranded at the phantom cursor position.
+	autoBreak, autoBreakMargin := r.pdf.GetAutoPageBreak()
+	r.pdf.SetAutoPageBreak(false, 0)
+	defer r.pdf.SetAutoPageBreak(autoBreak, autoBreakMargin)
+
 	// The header row (first row with header cells) repeats whenever the table
 	// breaks across pages.
 	headerRowIdx := -1
@@ -322,9 +330,8 @@ func (r *renderer) renderTable() {
 
 		// Add a page break before the row if needed.
 		rowY := r.pdf.GetY()
-		_, brkMargin := r.pdf.GetAutoPageBreak()
 		_, pageH := r.pdf.GetPageSize()
-		if rowY+rowH > pageH-brkMargin {
+		if rowY+rowH > pageH-autoBreakMargin {
 			r.pdf.AddPage()
 			rowY = r.pdf.GetY()
 			// Repeat the header row on the new page so columns stay labelled.

@@ -460,7 +460,7 @@ func TestConvert_CompanyHeaderRepeatsOnEveryPage(t *testing.T) {
 	require.NoError(t, err)
 
 	require.GreaterOrEqual(t, countPDFPages(pdf.Bytes()), 3,
-		"a 140-row table must span several pages, each drawing the company header")	
+		"a 140-row table must span several pages, each drawing the company header")
 }
 
 // countPDFPages counts page objects in an uncompressed fpdf document. Every
