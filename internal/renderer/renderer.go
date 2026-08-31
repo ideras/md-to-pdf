@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"strings"
+	"unicode"
 
 	"codeberg.org/go-pdf/fpdf"
 	"github.com/alecthomas/chroma/v2"
@@ -681,35 +682,101 @@ func (r *renderer) renderHighlightedCode(lang, code string) bool {
 	return true
 }
 
+type highlightedCodeRune struct {
+	value     rune
+	tokenType chroma.TokenType
+}
+
+// wrapCodeTokens splits one highlighted source line into visual lines that fit
+// inside maxWidth. Token types are retained so syntax colours survive wrapping.
+func (r *renderer) wrapCodeTokens(tokens []chroma.Token, maxWidth float64) [][]chroma.Token {
+	var runes []highlightedCodeRune
+	for _, token := range tokens {
+		text := strings.ReplaceAll(sanitizePDFText(token.Value), "\r", "")
+		for _, value := range text {
+			runes = append(runes, highlightedCodeRune{value: value, tokenType: token.Type})
+		}
+	}
+	if len(runes) == 0 {
+		return [][]chroma.Token{{}}
+	}
+
+	group := func(values []highlightedCodeRune) []chroma.Token {
+		if len(values) == 0 {
+			return nil
+		}
+		grouped := make([]chroma.Token, 0, len(values))
+		for _, value := range values {
+			if len(grouped) == 0 || grouped[len(grouped)-1].Type != value.tokenType {
+				grouped = append(grouped, chroma.Token{Type: value.tokenType})
+			}
+			grouped[len(grouped)-1].Value += string(value.value)
+		}
+		return grouped
+	}
+
+	var lines [][]chroma.Token
+	for len(runes) > 0 {
+		width := 0.0
+		breakAt := -1
+		overflowAt := len(runes)
+		for i, value := range runes {
+			if unicode.IsSpace(value.value) {
+				breakAt = i
+			}
+			runeWidth := r.pdf.GetStringWidth(string(value.value))
+			if width+runeWidth > maxWidth {
+				overflowAt = i
+				if overflowAt == 0 {
+					overflowAt = 1
+				}
+				break
+			}
+			width += runeWidth
+		}
+
+		if overflowAt == len(runes) {
+			lines = append(lines, group(runes))
+			break
+		}
+
+		lineEnd, nextStart := overflowAt, overflowAt
+		if breakAt > 0 && breakAt <= overflowAt {
+			// Exclude the whitespace used as the visual-line separator, matching
+			// fpdf's normal Write wrapping behaviour.
+			lineEnd, nextStart = breakAt, breakAt+1
+		}
+		lines = append(lines, group(runes[:lineEnd]))
+		runes = runes[nextStart:]
+	}
+	return lines
+}
+
 func (r *renderer) renderCodeLine(tokens []chroma.Token) {
-	// Check if we're near the page break boundary.
-	// If so, add a new page BEFORE drawing the background — otherwise Rect()
-	// paints the background on the old page while Write() auto-breaks to the
-	// new one, leaving the text without its background.
-	y := r.pdf.GetY()
-	_, brkMargin := r.pdf.GetAutoPageBreak()
-	_, pageH := r.pdf.GetPageSize()
-	if y+lineHeight > pageH-brkMargin {
-		r.pdf.AddPage()
-		y = r.pdf.GetY()
-	}
-
 	x := marginLeft + 4
+	blockWidth := r.width - 8
 
-	// 1. Draw background rectangle for the full line width
-	r.pdf.SetFillColor(248, 249, 250)
-	r.pdf.Rect(x, y, r.width-8, lineHeight, "F")
+	// Wrap before drawing so every visual line receives its own background.
+	// Letting Write wrap implicitly paints only the first source line's Rect.
+	for _, line := range r.wrapCodeTokens(tokens, blockWidth) {
+		y := r.pdf.GetY()
+		_, brkMargin := r.pdf.GetAutoPageBreak()
+		_, pageH := r.pdf.GetPageSize()
+		if y+lineHeight > pageH-brkMargin {
+			r.pdf.AddPage()
+			y = r.pdf.GetY()
+		}
 
-	// 2. Write each coloured token on the same line using Write()
-	r.pdf.SetX(x)
-	for _, t := range tokens {
-		rr, gg, bb := tokenColor(t.Type)
-		r.pdf.SetTextColor(rr, gg, bb)
-		r.pdf.Write(lineHeight, sanitizePDFText(t.Value))
+		r.pdf.SetFillColor(248, 249, 250)
+		r.pdf.Rect(x, y, blockWidth, lineHeight, "F")
+		r.pdf.SetXY(x, y)
+		for _, token := range line {
+			rr, gg, bb := tokenColor(token.Type)
+			r.pdf.SetTextColor(rr, gg, bb)
+			r.pdf.Write(lineHeight, token.Value)
+		}
+		r.pdf.SetXY(x, y+lineHeight)
 	}
-
-	// 3. Advance to the next line
-	r.pdf.Ln(lineHeight)
 }
 
 func (r *renderer) renderPlainCode(code string) {
