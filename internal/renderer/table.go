@@ -174,9 +174,12 @@ func (r *renderer) renderTable() {
 		for i, cell := range row.cells {
 			// Include cell padding (2 × cellPadX) plus slack so SplitText and
 			// GetStringWidth rounding differences do not force unwanted wraps.
+			// Slack scales with the table's actual body font size: using the
+			// document default font size here balloons narrow numeric columns
+			// when a dense report opts into a smaller table font.
 			// Natural width is measured with the regular body font (code spans
 			// with the mono font) to mirror the pre-segment behaviour.
-			cw := r.cellContentWidth(&cell, false) + fontMM(fontSize)*3.5
+			cw := r.cellContentWidth(&cell, false) + fontMM(r.tableBodyFontSize())*3.5
 			if cw > naturalWidths[i] {
 				naturalWidths[i] = cw
 			}
@@ -184,7 +187,7 @@ func (r *renderer) renderTable() {
 				// Include cell padding (2 × cellPadX) plus slack so short
 				// headers (e.g. "Puntaje") stay on one line. Measured with
 				// the bold font so the minimum protects the wider bold glyphs.
-				hw := r.cellContentWidth(&cell, true) + fontMM(fontSize)*4.0
+				hw := r.cellContentWidth(&cell, true) + fontMM(r.tableBodyFontSize())*4.0
 				if hw > minWidths[i] {
 					minWidths[i] = hw
 				}
@@ -373,12 +376,11 @@ func fitTableColumnWidths(naturalWidths, minWidths, columnWeights []float64, ava
 	}
 	weightedWidth = availWidth - unweightedWidth
 
-	if weightSum <= 0 || availWidth <= 0 || weightedWidth <= 0 {
-		return fitTableColumnWidthsByContent(naturals, mins, availWidth)
-	}
-
+	// Collect the columns that receive weighted distribution and the shortest
+	// width they can honestly hold (headers on one line).
 	widths := make([]float64, numCols)
 	open := make([]int, 0, numCols)
+	weightedMinSum := 0.0
 	for i := 0; i < numCols; i++ {
 		if weightOf(i) == 0 {
 			widths[i] = naturals[i]
@@ -386,6 +388,16 @@ func fitTableColumnWidths(naturalWidths, minWidths, columnWeights []float64, ava
 		}
 		widths[i] = -1
 		open = append(open, i)
+		weightedMinSum += mins[i]
+	}
+
+	if weightSum <= 0 || availWidth <= 0 || weightedWidth < weightedMinSum {
+		ok := weightSum > 0 && availWidth > 0 &&
+			drainUnweightedHeadroom(naturals, mins, columnWeights, widths, availWidth)
+		if !ok {
+			return fitTableColumnWidthsByContent(naturals, mins, availWidth)
+		}
+		weightedWidth = weightedMinSum
 	}
 
 	// Assign weighted columns proportional to their weights. Columns whose
@@ -443,6 +455,62 @@ func fitTableColumnWidths(naturalWidths, minWidths, columnWeights []float64, ava
 	}
 	widths[numCols-1] += delta
 	return widths
+}
+
+// drainUnweightedHeadroom reports whether the shortfall a weighted column
+// needs can be recovered by shrinking the unweighted columns from their
+// natural widths toward their minimums. On success it adjusts widths in place
+// and the weighted pool becomes the weighted minimum sum.
+func drainUnweightedHeadroom(naturals, mins, columnWeights, widths []float64, availWidth float64) bool {
+	weightedMinSum := 0.0
+	for i := range naturals {
+		weight := 0.0
+		if i < len(columnWeights) && columnWeights[i] > 0 {
+			weight = columnWeights[i]
+		}
+		if weight > 0 {
+			weightedMinSum += mins[i]
+		}
+	}
+	pool := availWidth
+	for i := range naturals {
+		weight := 0.0
+		if i < len(columnWeights) && columnWeights[i] > 0 {
+			weight = columnWeights[i]
+		}
+		if weight == 0 {
+			pool -= naturals[i]
+		}
+	}
+	deficit := weightedMinSum - pool
+	extraSum := 0.0
+	for i := range naturals {
+		weight := 0.0
+		if i < len(columnWeights) && columnWeights[i] > 0 {
+			weight = columnWeights[i]
+		}
+		if weight == 0 && naturals[i] > mins[i] {
+			extraSum += naturals[i] - mins[i]
+		}
+	}
+	if deficit <= 0 || extraSum < deficit {
+		return false
+	}
+	for i := range naturals {
+		weight := 0.0
+		if i < len(columnWeights) && columnWeights[i] > 0 {
+			weight = columnWeights[i]
+		}
+		if weight == 0 {
+			extra := naturals[i] - mins[i]
+			if extra > 0 {
+				widths[i] = naturals[i] - deficit*(extra/extraSum)
+			} else {
+				widths[i] = naturals[i]
+			}
+		}
+	}
+	return true
 }
 
 // fitTableColumnWidthsByContent sizes columns purely by content: natural
